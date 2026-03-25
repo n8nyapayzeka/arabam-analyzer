@@ -1,38 +1,39 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import asyncio
+import re
 
-app = FastAPI(title="Arabam Analiz API - Test Modu")
+app = FastAPI(title="Arabam Fırsat Botu API")
 
 class AnalyzeRequest(BaseModel):
     ilan_url: str
 
 @app.get("/")
 async def home():
-    return {
-        "status": "✅ API ÇALIŞIYOR",
-        "message": "Railway deploy başarılı. Test modundasınız."
-    }
+    return {"status": "✅ API ÇALIŞIYOR (Test Modu)", "platform": "Railway"}
 
 @app.post("/analyze")
 async def analyze(request: AnalyzeRequest):
-    # Test için sabit yanıt veriyoruz (gerçek scraping'i sonra ekleyeceğiz)
-    await asyncio.sleep(1.5)  # biraz gerçekçi bekleme
-    
+    await asyncio.sleep(1.2)  # biraz gerçekçi his versin
+
+    # Basit URL parsing ile ilan numarasını al
+    ilan_id = re.search(r'/ilan/(\d+)', request.ilan_url)
+    ilan_id = ilan_id.group(1) if ilan_id else "Bilinmiyor"
+
     return {
         "success": True,
         "ilan": {
             "url": request.ilan_url,
-            "full_title": "Test Modu - Skoda Octavia 1.5 TSI",
-            "brand": "Skoda",
-            "model": "Octavia",
+            "ilan_id": ilan_id,
+            "full_title": "Test Modu - İlan Analizi",
+            "brand": "Test Marka",
+            "model": "Test Model",
             "year": 2023,
             "mileage": 45000,
-            "price": 1285000,
-            "location": "İstanbul"
+            "price": 1350000
         },
-        "firsat_skoru": 82,
-        "oner_i": "🚀 AL! Çok iyi fırsat",
-        "aciklama": "Bu mesaj test modundan geliyor. Gerçek scraping yakında aktif olacak.",
-        "note": "Railway'de Selenium şu an çok kaynak tükettiği için devre dışı."
+        "firsat_skoru": 79,
+        "oner_i": "🚀 AL! İyi fırsat görünüyor",
+        "aciklama": "Şu anda test modundayız. Gerçek scraping (Cloudflare bypass) yakında eklenecek.\n\nTelegram botu çalışıyor ✓",
+        "note": "Railway ücretsiz planda Selenium çok zor çalıştığı için test moduna geçtik."
     }
