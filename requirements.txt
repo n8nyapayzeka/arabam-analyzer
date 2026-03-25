@@ -1,4 +1,7 @@
 fastapi
 uvicorn[standard]
-playwright
 pydantic
+beautifulsoup4
+undetected-chromedriver
+selenium
+python-dotenv
