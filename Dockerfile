@@ -1,12 +1,12 @@
-FROM mcr.microsoft.com/playwright/python:v1.58.0-noble
+FROM python:3.11
 
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+RUN playwright install --with-deps
+
 COPY . .
 
-ENV PORT=8000
-
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
