@@ -1,11 +1,6 @@
 FROM python:3.12-slim
 
-# Gerekli sistem paketleri (Chrome + Selenium için)
 RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    unzip \
-    curl \
     chromium \
     chromium-driver \
     libglib2.0-0 \
@@ -34,5 +29,7 @@ COPY . .
 ENV PORT=8000
 ENV CHROME_BIN=/usr/bin/chromium
 ENV CHROMEDRIVER_PATH=/usr/bin/chromedriver
+ENV PYTHONUNBUFFERED=1
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "${PORT}"]
+# Railway için memory optimizasyonu
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "${PORT}", "--workers", "1"]
