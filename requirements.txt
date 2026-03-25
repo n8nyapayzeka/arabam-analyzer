@@ -2,5 +2,4 @@ fastapi
 uvicorn[standard]
 pydantic
 beautifulsoup4
-undetected-chromedriver
 selenium
