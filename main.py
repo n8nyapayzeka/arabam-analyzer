@@ -47,15 +47,14 @@ def find_price_from_jsonld(jsonld_blocks):
 
             offers = item.get("offers")
             if isinstance(offers, dict):
-                price = offers.get("price")
-                val = clean_int(price)
+                val = clean_int(offers.get("price"))
                 if val and val > 10000:
                     return val
 
-            if "price" in item:
-                val = clean_int(item.get("price"))
-                if val and val > 10000:
-                    return val
+            val = clean_int(item.get("price"))
+            if val and val > 10000:
+                return val
+
     return None
 
 
@@ -73,6 +72,7 @@ def find_title_from_jsonld(jsonld_blocks):
             name = item.get("name")
             if isinstance(name, str) and len(name.strip()) > 4:
                 return name.strip()
+
     return None
 
 
@@ -153,17 +153,6 @@ def analyze(req: AnalyzeRequest):
             except Exception:
                 body_text = ""
 
-            if "/ilan/" not in current_url:
-                raise Exception(f"İlan sayfasına gidilemedi. Açılan sayfa: {current_url}")
-
-            if (
-                "{{advertCity}}" in body_text
-                or "{{advertYear}}" in body_text
-                or "{{advertTitle}}" in body_text
-                or "2. EL ARABA VİTRİN İLANLARI" in body_text
-            ):
-                raise Exception("İlan sayfası yerine anasayfa/şablon içerik geldi")
-
             jsonld_blocks = []
             try:
                 jsonld_blocks = page.locator("script[type='application/ld+json']").all_text_contents()
@@ -172,7 +161,6 @@ def analyze(req: AnalyzeRequest):
 
             # TITLE
             title = find_title_from_jsonld(jsonld_blocks) or "-"
-
             if title == "-" or len(title) < 4:
                 title_selectors = ["h1", "[class*='title'] h1", "[class*='product-title']", "title"]
                 for sel in title_selectors:
@@ -211,9 +199,6 @@ def analyze(req: AnalyzeRequest):
                 if m:
                     price = clean_int(m.group(0))
 
-            if not price:
-                raise Exception("Fiyat bilgisi bulunamadı")
-
             # DETAIL AREA
             detail_texts = []
             try:
@@ -223,62 +208,57 @@ def analyze(req: AnalyzeRequest):
 
             joined_details = "\n".join(detail_texts) + "\n" + body_text + "\n" + html
 
-            # YEAR
             year = None
-            year_patterns = [
+            year_str = extract_with_regex([
                 r"Model Yılı[:\s]*([12][09]\d{2}|20\d{2})",
                 r'"year"\s*:\s*"?(19\d{2}|20\d{2})"?',
                 r"\b(19\d{2}|20\d{2})\b",
-            ]
-            year_str = extract_with_regex(year_patterns, joined_details)
+            ], joined_details)
             if year_str:
                 year = clean_int(year_str)
 
-            # KM
             km = None
-            km_patterns = [
+            km_str = extract_with_regex([
                 r"Kilometre[:\s]*([\d\.\, ]+)",
                 r"KM[:\s]*([\d\.\, ]+)",
                 r'"mileageFromOdometer"\s*:\s*{.*?"value"\s*:\s*"?(\\d[\d\.\, ]+)"?',
                 r"(\d[\d\.\, ]{2,})\s*km\b",
-            ]
-            km_str = extract_with_regex(km_patterns, joined_details)
+            ], joined_details)
             if km_str:
                 km = clean_int(km_str)
 
-            # FUEL
-            fuel = "-"
-            fuel_patterns = [
+            fuel = extract_with_regex([
                 r"Yakıt Tipi[:\s]*([^\n<]+)",
                 r"Yakıt[:\s]*([^\n<]+)",
-            ]
-            fuel_str = extract_with_regex(fuel_patterns, joined_details)
-            if fuel_str:
-                fuel = fuel_str.strip()
+            ], joined_details) or "-"
 
-            # TRANSMISSION
-            transmission = "-"
-            transmission_patterns = [
+            transmission = extract_with_regex([
                 r"Vites Tipi[:\s]*([^\n<]+)",
                 r"Vites[:\s]*([^\n<]+)",
-            ]
-            transmission_str = extract_with_regex(transmission_patterns, joined_details)
-            if transmission_str:
-                transmission = transmission_str.strip()
+            ], joined_details) or "-"
 
-            # CITY
-            city = "-"
-            city_patterns = [
+            city = extract_with_regex([
                 r"Şehir[:\s]*([^\n<]+)",
                 r"İl[:\s]*([^\n<]+)",
                 r"\b(İstanbul|Ankara|İzmir|Bursa|Antalya|Adana|Konya|Gaziantep|Mersin|Kocaeli|Samsun|Kayseri|Eskişehir|Sakarya|Diyarbakır|Hatay|Aydın|Muğla|Balıkesir)\b",
-            ]
-            city_str = extract_with_regex(city_patterns, joined_details)
-            if city_str:
-                city = city_str.strip()
+            ], joined_details) or "-"
 
             context.close()
             browser.close()
+
+        if not price:
+            return {
+                "ok": False,
+                "error": "Fiyat bilgisi bulunamadı",
+                "debug": {
+                    "current_url": current_url,
+                    "title": title,
+                    "body_excerpt": body_text[:3000],
+                    "html_excerpt": html[:3000],
+                    "jsonld_count": len(jsonld_blocks),
+                    "jsonld_excerpt": jsonld_blocks[0][:1500] if jsonld_blocks else ""
+                }
+            }
 
         estimated_market = int(price * 1.08)
         delta = estimated_market - price
