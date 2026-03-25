@@ -52,85 +52,107 @@ def analyze(req: AnalyzeRequest):
                     "--disable-blink-features=AutomationControlled",
                 ],
             )
-            page = browser.new_page(
+
+            context = browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/134.0.0.0 Safari/537.36"
                 ),
+                locale="tr-TR",
                 viewport={"width": 1440, "height": 2200},
+                extra_http_headers={
+                    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
+                },
             )
 
-            page.goto(url, timeout=60000, wait_until="domcontentloaded")
-            page.wait_for_timeout(5000)
+            page = context.new_page()
+            page.goto(url, timeout=90000, wait_until="networkidle")
+            page.wait_for_timeout(7000)
 
-            body_text = ""
-            try:
-                body_text = page.locator("body").inner_text(timeout=5000)
-            except Exception:
-                body_text = ""
+            cookie_selectors = [
+                "button:has-text('Kabul Et')",
+                "button:has-text('Tümünü Kabul Et')",
+                "button:has-text('Anladım')",
+                "[id*='accept']",
+                "[class*='accept']",
+            ]
+
+            for sel in cookie_selectors:
+                try:
+                    btn = page.locator(sel).first
+                    if btn.count() > 0:
+                        btn.click(timeout=2000)
+                        page.wait_for_timeout(1500)
+                        break
+                except Exception:
+                    pass
+
+            current_url = page.url
+            body_text = page.locator("body").inner_text(timeout=8000)
+
+            if "/ilan/" not in current_url:
+                raise Exception(f"İlan sayfasına gidilemedi. Açılan sayfa: {current_url}")
+
+            if (
+                "{{advertCity}}" in body_text
+                or "{{advertYear}}" in body_text
+                or "{{advertTitle}}" in body_text
+                or "2. EL ARABA VİTRİN İLANLARI" in body_text
+            ):
+                raise Exception("İlan sayfası yerine anasayfa/şablon içerik geldi")
 
             # TITLE
             title = "-"
-            title_selectors = [
-                "h1",
-                "[class*='title'] h1",
-                "[class*='product-title']",
-                "title",
-            ]
+            try:
+                h1 = page.locator("h1").first
+                if h1.count() > 0:
+                    title = h1.inner_text(timeout=5000).strip()
+            except Exception:
+                pass
 
-            for sel in title_selectors:
-                try:
-                    loc = page.locator(sel).first
-                    if loc.count() > 0:
-                        txt = loc.inner_text(timeout=5000).strip()
-                        if txt and len(txt) > 2:
-                            title = txt
-                            break
-                except Exception:
-                    pass
+            if title == "-" or len(title) < 4:
+                title_patterns = [
+                    r"İlan Başlığı[:\s]*([^\n]+)",
+                    r"\b((?:19|20)\d{2}[^\n]{5,})",
+                ]
+                title_from_text = extract_with_regex(title_patterns, body_text)
+                if title_from_text:
+                    title = title_from_text.strip()
 
-            if title == "-" and body_text:
-                first_line = body_text.splitlines()[0].strip() if body_text.splitlines() else ""
-                if first_line:
-                    title = first_line
+            if title == "-" or len(title) < 4:
+                slug = current_url.strip("/").split("/")[-1]
+                title = slug.replace("-", " ").title()
 
             # PRICE
             price = None
-            price_text = None
+            price_match = re.search(r"(\d[\d\.\, ]{2,})\s*TL", body_text, re.IGNORECASE)
+            if price_match:
+                price = clean_int(price_match.group(0))
 
-            price_selectors = [
-                "text=/[0-9\\., ]+\\s*TL/i",
-                "[class*='price']",
-                "[class*='listing-price']",
-                "[class*='product-price']",
-                "[data-testid*='price']",
-                "xpath=//*[contains(text(),'TL')]",
-            ]
-
-            for sel in price_selectors:
-                try:
-                    loc = page.locator(sel).first
-                    if loc.count() > 0:
-                        txt = loc.inner_text(timeout=5000).strip()
-                        val = clean_int(txt)
-                        if val and val > 10000:
-                            price_text = txt
-                            price = val
-                            break
-                except Exception:
-                    pass
-
-            if not price and body_text:
-                m = re.search(r"(\d[\d\.\, ]{3,})\s*TL", body_text, re.IGNORECASE)
-                if m:
-                    price_text = m.group(0)
-                    price = clean_int(price_text)
+            if not price:
+                price_selectors = [
+                    "[class*='price']",
+                    "[class*='listing-price']",
+                    "[class*='product-price']",
+                    "[data-testid*='price']",
+                ]
+                for sel in price_selectors:
+                    try:
+                        loc = page.locator(sel).first
+                        if loc.count() > 0:
+                            txt = loc.inner_text(timeout=4000).strip()
+                            val = clean_int(txt)
+                            if val and val > 10000:
+                                price = val
+                                break
+                    except Exception:
+                        pass
 
             if not price:
                 raise Exception("Fiyat bilgisi bulunamadı")
 
-            # DETAIL TEXTS
+            # DETAIL AREA
             detail_texts = []
             try:
                 detail_texts = page.locator("li").all_inner_texts()
@@ -185,14 +207,16 @@ def analyze(req: AnalyzeRequest):
             city_patterns = [
                 r"Şehir[:\s]*([^\n]+)",
                 r"İl[:\s]*([^\n]+)",
+                r"\b(İstanbul|Ankara|İzmir|Bursa|Antalya|Adana|Konya|Gaziantep|Mersin|Kocaeli|Samsun|Kayseri|Eskişehir|Sakarya|Diyarbakır|Hatay|Aydın|Muğla|Balıkesir)\b",
             ]
             city_str = extract_with_regex(city_patterns, joined_details)
             if city_str:
                 city = city_str.strip()
 
+            context.close()
             browser.close()
 
-        # Basit ilk piyasa modeli
+        # İlk basit piyasa modeli
         estimated_market = int(price * 1.08)
         delta = estimated_market - price
         percent = round((delta / price) * 100, 2) if price else 0
@@ -203,7 +227,7 @@ def analyze(req: AnalyzeRequest):
         likidite = 65
 
         decision = "✅ ALINABİLİR" if delta > 0 else "❌ PAHALI"
-        reason = "İlk gerçek analiz versiyonu"
+        reason = "Gerçek veri + geliştirilmiş parse"
 
         title_parts = title.split()
         brand = title_parts[0] if len(title_parts) > 0 else "-"
@@ -259,7 +283,7 @@ def analyze(req: AnalyzeRequest):
                 "likidite_skoru": likidite,
                 "decision_label": decision,
                 "decision_reason": reason,
-                "commentary": "Gerçek veri + algoritmik tahmin",
+                "commentary": "Gerçek veri + geliştirilmiş parse",
             },
         }
 
