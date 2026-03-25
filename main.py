@@ -67,13 +67,19 @@ def analyze(req: AnalyzeRequest):
             )
 
             page = context.new_page()
-            page.goto(url, timeout=90000, wait_until="networkidle")
-            page.wait_for_timeout(7000)
+
+            try:
+                page.goto(url, timeout=90000, wait_until="domcontentloaded")
+            except Exception:
+                page.goto(url, timeout=90000)
+
+            page.wait_for_timeout(5000)
 
             cookie_selectors = [
                 "button:has-text('Kabul Et')",
                 "button:has-text('Tümünü Kabul Et')",
                 "button:has-text('Anladım')",
+                "button:has-text('Tamam')",
                 "[id*='accept']",
                 "[class*='accept']",
             ]
@@ -89,7 +95,11 @@ def analyze(req: AnalyzeRequest):
                     pass
 
             current_url = page.url
-            body_text = page.locator("body").inner_text(timeout=8000)
+
+            try:
+                body_text = page.locator("body").inner_text(timeout=8000)
+            except Exception:
+                body_text = ""
 
             if "/ilan/" not in current_url:
                 raise Exception(f"İlan sayfasına gidilemedi. Açılan sayfa: {current_url}")
@@ -104,12 +114,23 @@ def analyze(req: AnalyzeRequest):
 
             # TITLE
             title = "-"
-            try:
-                h1 = page.locator("h1").first
-                if h1.count() > 0:
-                    title = h1.inner_text(timeout=5000).strip()
-            except Exception:
-                pass
+            title_selectors = [
+                "h1",
+                "[class*='title'] h1",
+                "[class*='product-title']",
+                "title",
+            ]
+
+            for sel in title_selectors:
+                try:
+                    loc = page.locator(sel).first
+                    if loc.count() > 0:
+                        txt = loc.inner_text(timeout=5000).strip()
+                        if txt and len(txt) > 2:
+                            title = txt
+                            break
+                except Exception:
+                    pass
 
             if title == "-" or len(title) < 4:
                 title_patterns = [
@@ -126,6 +147,7 @@ def analyze(req: AnalyzeRequest):
 
             # PRICE
             price = None
+
             price_match = re.search(r"(\d[\d\.\, ]{2,})\s*TL", body_text, re.IGNORECASE)
             if price_match:
                 price = clean_int(price_match.group(0))
@@ -136,6 +158,7 @@ def analyze(req: AnalyzeRequest):
                     "[class*='listing-price']",
                     "[class*='product-price']",
                     "[data-testid*='price']",
+                    "xpath=//*[contains(text(),'TL')]",
                 ]
                 for sel in price_selectors:
                     try:
@@ -216,7 +239,7 @@ def analyze(req: AnalyzeRequest):
             context.close()
             browser.close()
 
-        # İlk basit piyasa modeli
+        # Basit ilk piyasa modeli
         estimated_market = int(price * 1.08)
         delta = estimated_market - price
         percent = round((delta / price) * 100, 2) if price else 0
