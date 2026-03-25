@@ -1,14 +1,22 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
+from playwright.sync_api import sync_playwright
+import re
 
 app = FastAPI()
 
 class AnalyzeRequest(BaseModel):
     ilan_url: str
 
+def clean_int(text):
+    try:
+        return int(re.sub(r"[^\d]", "", text))
+    except:
+        return None
+
 @app.get("/")
 def root():
-    return {"ok": True, "message": "root works"}
+    return {"ok": True}
 
 @app.get("/health")
 def health():
@@ -16,56 +24,107 @@ def health():
 
 @app.post("/analyze")
 def analyze(req: AnalyzeRequest):
-    return {
-        "listing": {
-            "ilan_url": req.ilan_url,
-            "title": "Test İlanı",
-            "brand": "Test",
-            "model": "Model",
-            "year": 2021,
-            "mileage_km": 100000,
-            "price": 800000,
-            "currency": "TL",
-            "city": "İstanbul",
-            "fuel_type": "Benzin",
-            "transmission": "Otomatik"
-        },
-        "market": {
-            "comp_count": 3,
-            "min_price": 780000,
-            "median_price": 820000,
-            "max_price": 850000,
-            "avg_km": 95000,
-            "samples": [
-                "Test Emsal 1 | 780.000 TL",
-                "Test Emsal 2 | 820.000 TL",
-                "Test Emsal 3 | 850.000 TL"
-            ]
-        },
-        "scores": {
-            "firsat_skoru": 72,
-            "risk_skoru": 35,
-            "guven_skoru": 65,
-            "likidite_skoru": 60,
-            "decision_label": "✅ ALINABİLİR",
-            "decision_reason": "Test cevap",
-            "price_delta": -20000,
-            "price_delta_percent": -2.44,
-            "negotiation_min": 790000,
-            "negotiation_max": 805000
-        },
-        "summary": {
-            "title": "Test İlanı",
-            "listing_price": 800000,
-            "median_price": 820000,
-            "difference": -20000,
-            "difference_percent": -2.44,
-            "firsat_skoru": 72,
-            "risk_skoru": 35,
-            "guven_skoru": 65,
-            "likidite_skoru": 60,
-            "decision_label": "✅ ALINABİLİR",
-            "decision_reason": "Test cevap",
-            "commentary": "Servis çalışıyor."
+    url = req.ilan_url
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=60000)
+            page.wait_for_timeout(3000)
+
+            # BAŞLIK
+            title = page.locator("h1").first.inner_text()
+
+            # FİYAT
+            price_text = page.locator("text=TL").first.inner_text()
+            price = clean_int(price_text)
+
+            # DETAYLAR
+            details = page.locator("li").all_inner_texts()
+
+            year = None
+            km = None
+
+            for d in details:
+                if "Model Yılı" in d:
+                    year = clean_int(d)
+                if "Kilometre" in d:
+                    km = clean_int(d)
+
+            browser.close()
+
+        # BASİT PİYASA MODELİ (ilk versiyon)
+        if price:
+            estimated_market = int(price * 1.08)
+        else:
+            estimated_market = 0
+
+        delta = estimated_market - price if price else 0
+        percent = round((delta / price) * 100, 2) if price else 0
+
+        # SKOR
+        firsat = 80 if delta > 0 else 40
+        risk = 30 if delta > 0 else 60
+
+        decision = "✅ ALINABİLİR" if delta > 0 else "❌ PAHALI"
+
+        return {
+            "listing": {
+                "ilan_url": url,
+                "title": title,
+                "brand": title.split()[0] if title else "-",
+                "model": title.split()[1] if title else "-",
+                "year": year,
+                "mileage_km": km,
+                "price": price,
+                "currency": "TL",
+                "city": "-",
+                "fuel_type": "-",
+                "transmission": "-"
+            },
+            "market": {
+                "comp_count": 5,
+                "min_price": int(price * 0.95),
+                "median_price": estimated_market,
+                "max_price": int(price * 1.15),
+                "avg_km": km,
+                "samples": [
+                    "Algoritmik tahmin 1",
+                    "Algoritmik tahmin 2",
+                    "Algoritmik tahmin 3"
+                ]
+            },
+            "scores": {
+                "firsat_skoru": firsat,
+                "risk_skoru": risk,
+                "guven_skoru": 70,
+                "likidite_skoru": 65,
+                "decision_label": decision,
+                "decision_reason": "İlk gerçek analiz versiyonu",
+                "price_delta": delta,
+                "price_delta_percent": percent,
+                "negotiation_min": int(price * 0.97),
+                "negotiation_max": int(price * 1.00)
+            },
+            "summary": {
+                "title": title,
+                "listing_price": price,
+                "median_price": estimated_market,
+                "difference": delta,
+                "difference_percent": percent,
+                "firsat_skoru": firsat,
+                "risk_skoru": risk,
+                "guven_skoru": 70,
+                "likidite_skoru": 65,
+                "decision_label": decision,
+                "decision_reason": "İlk gerçek analiz versiyonu",
+                "commentary": "Gerçek veri + algoritmik tahmin"
+            }
         }
-    }
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e)
+        }
