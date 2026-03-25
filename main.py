@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from playwright.sync_api import sync_playwright
 import re
+import json
 
 app = FastAPI()
 
@@ -19,9 +20,59 @@ def clean_int(text):
 
 def extract_with_regex(patterns, text):
     for pattern in patterns:
-        m = re.search(pattern, text, re.IGNORECASE)
+        m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
         if m:
             return m.group(1).strip() if m.groups() else m.group(0).strip()
+    return None
+
+
+def try_parse_json(text):
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def find_price_from_jsonld(jsonld_blocks):
+    for raw in jsonld_blocks:
+        parsed = try_parse_json(raw)
+        if not parsed:
+            continue
+
+        items = parsed if isinstance(parsed, list) else [parsed]
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            offers = item.get("offers")
+            if isinstance(offers, dict):
+                price = offers.get("price")
+                val = clean_int(price)
+                if val and val > 10000:
+                    return val
+
+            if "price" in item:
+                val = clean_int(item.get("price"))
+                if val and val > 10000:
+                    return val
+    return None
+
+
+def find_title_from_jsonld(jsonld_blocks):
+    for raw in jsonld_blocks:
+        parsed = try_parse_json(raw)
+        if not parsed:
+            continue
+
+        items = parsed if isinstance(parsed, list) else [parsed]
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if isinstance(name, str) and len(name.strip()) > 4:
+                return name.strip()
     return None
 
 
@@ -95,6 +146,7 @@ def analyze(req: AnalyzeRequest):
                     pass
 
             current_url = page.url
+            html = page.content()
 
             try:
                 body_text = page.locator("body").inner_text(timeout=8000)
@@ -112,65 +164,52 @@ def analyze(req: AnalyzeRequest):
             ):
                 raise Exception("İlan sayfası yerine anasayfa/şablon içerik geldi")
 
-            # TITLE
-            title = "-"
-            title_selectors = [
-                "h1",
-                "[class*='title'] h1",
-                "[class*='product-title']",
-                "title",
-            ]
+            jsonld_blocks = []
+            try:
+                jsonld_blocks = page.locator("script[type='application/ld+json']").all_text_contents()
+            except Exception:
+                jsonld_blocks = []
 
-            for sel in title_selectors:
-                try:
-                    loc = page.locator(sel).first
-                    if loc.count() > 0:
-                        txt = loc.inner_text(timeout=5000).strip()
-                        if txt and len(txt) > 2:
-                            title = txt
-                            break
-                except Exception:
-                    pass
+            # TITLE
+            title = find_title_from_jsonld(jsonld_blocks) or "-"
 
             if title == "-" or len(title) < 4:
-                title_patterns = [
-                    r"İlan Başlığı[:\s]*([^\n]+)",
-                    r"\b((?:19|20)\d{2}[^\n]{5,})",
-                ]
-                title_from_text = extract_with_regex(title_patterns, body_text)
-                if title_from_text:
-                    title = title_from_text.strip()
+                title_selectors = ["h1", "[class*='title'] h1", "[class*='product-title']", "title"]
+                for sel in title_selectors:
+                    try:
+                        loc = page.locator(sel).first
+                        if loc.count() > 0:
+                            txt = loc.inner_text(timeout=4000).strip()
+                            if txt and len(txt) > 4:
+                                title = txt
+                                break
+                    except Exception:
+                        pass
 
             if title == "-" or len(title) < 4:
                 slug = current_url.strip("/").split("/")[-1]
                 title = slug.replace("-", " ").title()
 
             # PRICE
-            price = None
-
-            price_match = re.search(r"(\d[\d\.\, ]{2,})\s*TL", body_text, re.IGNORECASE)
-            if price_match:
-                price = clean_int(price_match.group(0))
+            price = find_price_from_jsonld(jsonld_blocks)
 
             if not price:
-                price_selectors = [
-                    "[class*='price']",
-                    "[class*='listing-price']",
-                    "[class*='product-price']",
-                    "[data-testid*='price']",
-                    "xpath=//*[contains(text(),'TL')]",
+                html_patterns = [
+                    r'"price"\s*:\s*"?(\\d[\d\.\, ]+)"?',
+                    r'"finalPrice"\s*:\s*"?(\\d[\d\.\, ]+)"?',
+                    r'(\d[\d\.\, ]{2,})\s*TL',
                 ]
-                for sel in price_selectors:
-                    try:
-                        loc = page.locator(sel).first
-                        if loc.count() > 0:
-                            txt = loc.inner_text(timeout=4000).strip()
-                            val = clean_int(txt)
-                            if val and val > 10000:
-                                price = val
-                                break
-                    except Exception:
-                        pass
+                for pattern in html_patterns:
+                    m = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
+                    if m:
+                        price = clean_int(m.group(1) if m.groups() else m.group(0))
+                        if price and price > 10000:
+                            break
+
+            if not price and body_text:
+                m = re.search(r"(\d[\d\.\, ]{2,})\s*TL", body_text, re.IGNORECASE)
+                if m:
+                    price = clean_int(m.group(0))
 
             if not price:
                 raise Exception("Fiyat bilgisi bulunamadı")
@@ -182,13 +221,14 @@ def analyze(req: AnalyzeRequest):
             except Exception:
                 detail_texts = []
 
-            joined_details = "\n".join(detail_texts) + "\n" + body_text
+            joined_details = "\n".join(detail_texts) + "\n" + body_text + "\n" + html
 
             # YEAR
             year = None
             year_patterns = [
                 r"Model Yılı[:\s]*([12][09]\d{2}|20\d{2})",
-                r"\b([12][09]\d{2}|20\d{2})\b",
+                r'"year"\s*:\s*"?(19\d{2}|20\d{2})"?',
+                r"\b(19\d{2}|20\d{2})\b",
             ]
             year_str = extract_with_regex(year_patterns, joined_details)
             if year_str:
@@ -199,6 +239,7 @@ def analyze(req: AnalyzeRequest):
             km_patterns = [
                 r"Kilometre[:\s]*([\d\.\, ]+)",
                 r"KM[:\s]*([\d\.\, ]+)",
+                r'"mileageFromOdometer"\s*:\s*{.*?"value"\s*:\s*"?(\\d[\d\.\, ]+)"?',
                 r"(\d[\d\.\, ]{2,})\s*km\b",
             ]
             km_str = extract_with_regex(km_patterns, joined_details)
@@ -208,8 +249,8 @@ def analyze(req: AnalyzeRequest):
             # FUEL
             fuel = "-"
             fuel_patterns = [
-                r"Yakıt Tipi[:\s]*([^\n]+)",
-                r"Yakıt[:\s]*([^\n]+)",
+                r"Yakıt Tipi[:\s]*([^\n<]+)",
+                r"Yakıt[:\s]*([^\n<]+)",
             ]
             fuel_str = extract_with_regex(fuel_patterns, joined_details)
             if fuel_str:
@@ -218,8 +259,8 @@ def analyze(req: AnalyzeRequest):
             # TRANSMISSION
             transmission = "-"
             transmission_patterns = [
-                r"Vites Tipi[:\s]*([^\n]+)",
-                r"Vites[:\s]*([^\n]+)",
+                r"Vites Tipi[:\s]*([^\n<]+)",
+                r"Vites[:\s]*([^\n<]+)",
             ]
             transmission_str = extract_with_regex(transmission_patterns, joined_details)
             if transmission_str:
@@ -228,8 +269,8 @@ def analyze(req: AnalyzeRequest):
             # CITY
             city = "-"
             city_patterns = [
-                r"Şehir[:\s]*([^\n]+)",
-                r"İl[:\s]*([^\n]+)",
+                r"Şehir[:\s]*([^\n<]+)",
+                r"İl[:\s]*([^\n<]+)",
                 r"\b(İstanbul|Ankara|İzmir|Bursa|Antalya|Adana|Konya|Gaziantep|Mersin|Kocaeli|Samsun|Kayseri|Eskişehir|Sakarya|Diyarbakır|Hatay|Aydın|Muğla|Balıkesir)\b",
             ]
             city_str = extract_with_regex(city_patterns, joined_details)
@@ -239,7 +280,6 @@ def analyze(req: AnalyzeRequest):
             context.close()
             browser.close()
 
-        # Basit ilk piyasa modeli
         estimated_market = int(price * 1.08)
         delta = estimated_market - price
         percent = round((delta / price) * 100, 2) if price else 0
@@ -250,7 +290,7 @@ def analyze(req: AnalyzeRequest):
         likidite = 65
 
         decision = "✅ ALINABİLİR" if delta > 0 else "❌ PAHALI"
-        reason = "Gerçek veri + geliştirilmiş parse"
+        reason = "Gerçek veri + JSON-LD destekli parse"
 
         title_parts = title.split()
         brand = title_parts[0] if len(title_parts) > 0 else "-"
@@ -306,7 +346,7 @@ def analyze(req: AnalyzeRequest):
                 "likidite_skoru": likidite,
                 "decision_label": decision,
                 "decision_reason": reason,
-                "commentary": "Gerçek veri + geliştirilmiş parse",
+                "commentary": "Gerçek veri + JSON-LD destekli parse",
             },
         }
 
